@@ -79,6 +79,7 @@ def main(options):
             line = line.strip()
             if not line:
                 continue
+            line = line.decode()
             appsinstalled = parse_appsinstalled(line)
             if not appsinstalled:
                 errors += 1
