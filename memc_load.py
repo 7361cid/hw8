@@ -35,7 +35,8 @@ def insert_appsinstalled(memc_addr, appsinstalled, dry_run=False):
     # @TODO retry and timeouts!
     try:
         if dry_run:
-            logging.debug("%s - %s -> %s" % (memc_addr, key, str(ua).replace("\n", " ")))
+            ua_formated = str(ua).replace('\n', ' ')
+           # logging.debug(f"{memc_addr} - {key} -> {ua_formated} \n" )
         else:
             memc = memcache.Client([memc_addr])
             memc.set(key, packed)
@@ -75,6 +76,7 @@ def main(options):
         processed = errors = 0
         logging.info('Processing %s' % fn)
         fd = gzip.open(fn)
+        print(f"LOG  {len(fn)}")
         for line in fd:
             line = line.strip()
             if not line:
@@ -89,7 +91,7 @@ def main(options):
                 errors += 1
                 logging.error("Unknow device type: %s" % appsinstalled.dev_type)
                 continue
-            ok = insert_appsinstalled(memc_addr, appsinstalled, options.dry)
+            ok = insert_appsinstalled(memc_addr, appsinstalled, options.dry)  # Эту часть можно запараллелить
             if ok:
                 processed += 1
             else:
