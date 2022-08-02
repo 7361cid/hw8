@@ -6,7 +6,9 @@ import sys
 import glob
 import logging
 import collections
+import pathlib
 from optparse import OptionParser
+from threading import Thread
 # brew install protobuf
 # protoc  --python_out=. ./appsinstalled.proto
 # pip install protobuf
@@ -36,7 +38,7 @@ def insert_appsinstalled(memc_addr, appsinstalled, dry_run=False):
     try:
         if dry_run:
             ua_formated = str(ua).replace('\n', ' ')
-            logging.debug(f"{memc_addr} - {key} -> {ua_formated} \n" )
+           # logging.debug(f"{memc_addr} - {key} -> {ua_formated} \n" )
         else:
             memc = memcache.Client([memc_addr])
             memc.set(key, packed)
@@ -72,12 +74,21 @@ def main(options):
         "adid": options.adid,
         "dvid": options.dvid,
     }
-    for fn in glob.iglob(options.pattern):
+    rename_query = []  # очередь для переименования (эта операция должна быть последовательной)
+    lines = 0
+
+   # print(f"LOG0  {list(glob.iglob(options.pattern))}")
+   # print(f"LOG1  {list(pathlib.Path('.').glob(options.pattern))}")
+    for fn in pathlib.Path('.').glob(options.pattern):
         processed = errors = 0
         logging.info('Processing %s' % fn)
         fd = gzip.open(fn)
-        print(f"LOG  {len(fn)}")
+       # print(f"LOG  {len(str(fn))}  {fn}")
+       # print(f"LOG  {fd} {len(list(fd))}")
+       # print(line for line in fd)
+       # print(len(list(fd)))
         for line in fd:
+            lines += 1
             line = line.strip()
             if not line:
                 continue
@@ -91,13 +102,14 @@ def main(options):
                 errors += 1
                 logging.error("Unknow device type: %s" % appsinstalled.dev_type)
                 continue
-            ok = insert_appsinstalled(memc_addr, appsinstalled, options.dry)
+            ok = insert_appsinstalled(memc_addr, appsinstalled, options.dry)  # Эту часть можно запараллелить
             if ok:
                 processed += 1
             else:
                 errors += 1
         if not processed:
             fd.close()
+            rename_query.append(fn)
             dot_rename(fn)
             continue
 
@@ -107,7 +119,9 @@ def main(options):
         else:
             logging.error("High error rate (%s > %s). Failed load" % (err_rate, NORMAL_ERR_RATE))
         fd.close()
+        rename_query.append(fn)
         dot_rename(fn)
+    print(f"LOG2  {len(rename_query)} {rename_query}  lines {lines}")
 
 
 def prototest():
