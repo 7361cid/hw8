@@ -3,12 +3,12 @@
 import os
 import gzip
 import sys
-import glob
 import logging
 import collections
 import pathlib
+import numpy as np
+import threading
 from optparse import OptionParser
-from threading import Thread
 # brew install protobuf
 # protoc  --python_out=. ./appsinstalled.proto
 # pip install protobuf
@@ -18,6 +18,7 @@ import memcache
 
 NORMAL_ERR_RATE = 0.01
 AppsInstalled = collections.namedtuple("AppsInstalled", ["dev_type", "dev_id", "lat", "lon", "apps"])
+Statistic = {"errors": 0, "processed": 0}
 
 
 def dot_rename(path):
@@ -67,7 +68,34 @@ def parse_appsinstalled(line):
     return AppsInstalled(dev_type, dev_id, lat, lon, apps)
 
 
+def process_lines(device_memc, options, lines):
+    global Statistic
+    chunk_errors = chunk_processed = 0
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        line = line.decode()
+        appsinstalled = parse_appsinstalled(line)
+        if not appsinstalled:
+            chunk_errors += 1
+            continue
+        memc_addr = device_memc.get(appsinstalled.dev_type)
+        if not memc_addr:
+            chunk_errors += 1
+            logging.error("Unknow device type: %s" % appsinstalled.dev_type)
+            continue
+        ok = insert_appsinstalled(memc_addr, appsinstalled, options.dry)  # Эту часть можно запараллелить
+        if ok:
+            chunk_processed += 1
+        else:
+            chunk_errors += 1
+    Statistic["errors"] += chunk_errors
+    Statistic["processed"] += chunk_processed
+
+
 def main(options):
+    global Statistic
     device_memc = {
         "idfa": options.idfa,
         "gaid": options.gaid,
@@ -75,45 +103,29 @@ def main(options):
         "dvid": options.dvid,
     }
     rename_query = []  # очередь для переименования (эта операция должна быть последовательной)
-    lines = 0
 
    # print(f"LOG0  {list(glob.iglob(options.pattern))}")
    # print(f"LOG1  {list(pathlib.Path('.').glob(options.pattern))}")
     for fn in pathlib.Path('.').glob(options.pattern):
-        processed = errors = 0
         logging.info('Processing %s' % fn)
         fd = gzip.open(fn)
-       # print(f"LOG  {len(str(fn))}  {fn}")
-       # print(f"LOG  {fd} {len(list(fd))}")
-       # print(line for line in fd)
-       # print(len(list(fd)))
-        for line in fd:
-            lines += 1
-            line = line.strip()
-            if not line:
-                continue
-            line = line.decode()
-            appsinstalled = parse_appsinstalled(line)
-            if not appsinstalled:
-                errors += 1
-                continue
-            memc_addr = device_memc.get(appsinstalled.dev_type)
-            if not memc_addr:
-                errors += 1
-                logging.error("Unknow device type: %s" % appsinstalled.dev_type)
-                continue
-            ok = insert_appsinstalled(memc_addr, appsinstalled, options.dry)  # Эту часть можно запараллелить
-            if ok:
-                processed += 1
-            else:
-                errors += 1
-        if not processed:
+        lines_chunks = np.array_split([line for line in fd], 10)
+        threads = []
+        for lines in lines_chunks:
+            t = threading.Thread(target=process_lines, args=(device_memc, options, lines))
+            threads.append(t)
+            t.start()
+        for t in threads:
+            t.join()
+
+        if not Statistic["processed"]:
             fd.close()
             rename_query.append(fn)
             dot_rename(fn)
+            Statistic = {"errors": 0, "processed": 0}
             continue
 
-        err_rate = float(errors) / processed
+        err_rate = float(Statistic["errors"]) / Statistic["processed"]
         if err_rate < NORMAL_ERR_RATE:
             logging.info("Acceptable error rate (%s). Successfull load" % err_rate)
         else:
@@ -121,7 +133,8 @@ def main(options):
         fd.close()
         rename_query.append(fn)
         dot_rename(fn)
-    print(f"LOG2  {len(rename_query)} {rename_query}  lines {lines}")
+        Statistic = {"errors": 0, "processed": 0}
+    print(f"LOG2  {len(rename_query)} {rename_query}")
 
 
 def prototest():
