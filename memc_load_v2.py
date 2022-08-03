@@ -6,9 +6,11 @@ import sys
 import logging
 import collections
 import pathlib
+import time
 import numpy as np
 import threading
 from optparse import OptionParser
+from concurrent.futures.thread import ThreadPoolExecutor
 # brew install protobuf
 # protoc  --python_out=. ./appsinstalled.proto
 # pip install protobuf
@@ -19,7 +21,6 @@ import memcache
 NORMAL_ERR_RATE = 0.01
 AppsInstalled = collections.namedtuple("AppsInstalled", ["dev_type", "dev_id", "lat", "lon", "apps"])
 Statistic = {"errors": 0, "processed": 0}
-
 
 def dot_rename(path):
     head, fn = os.path.split(path)
@@ -68,7 +69,7 @@ def parse_appsinstalled(line):
     return AppsInstalled(dev_type, dev_id, lat, lon, apps)
 
 
-def process_lines(device_memc, options, lines):
+def process_lines(device_memc, options, lines, thread_id):
     global Statistic
     chunk_errors = chunk_processed = 0
     for line in lines:
@@ -90,12 +91,14 @@ def process_lines(device_memc, options, lines):
             chunk_processed += 1
         else:
             chunk_errors += 1
+    print(f"Log  {thread_id} finish work")
     Statistic["errors"] += chunk_errors
     Statistic["processed"] += chunk_processed
 
 
 def main(options):
     global Statistic
+    global Threads_finish_work
     device_memc = {
         "idfa": options.idfa,
         "gaid": options.gaid,
@@ -109,14 +112,21 @@ def main(options):
     for fn in pathlib.Path('.').glob(options.pattern):
         logging.info('Processing %s' % fn)
         fd = gzip.open(fn)
-        lines_chunks = np.array_split([line for line in fd], 10)
-        threads = []
-        for lines in lines_chunks:
-            t = threading.Thread(target=process_lines, args=(device_memc, options, lines))
-            threads.append(t)
-            t.start()
-        for t in threads:
-            t.join()
+
+        start_time = time.time()
+        lines_chunks = np.array_split([line for line in fd], 100)
+        #threads = []
+        #for i in range(len(lines_chunks)):
+        #    t = threading.Thread(target=process_lines, args=(device_memc, options, lines_chunks[i], f"thread{i}"))
+        #    threads.append(t)
+        #    t.start()
+        #while Threads_finish_work < 100:
+        #    pass
+        with ThreadPoolExecutor(max_workers=100) as executor:
+            for i in range(len(lines_chunks)):
+                future = executor.submit(process_lines, device_memc, options, lines_chunks[i], f"thread{i}")
+                print(future.result())
+        print(f"Time for lines procecced --- {(time.time() - start_time)} seconds ---")
 
         if not Statistic["processed"]:
             fd.close()
@@ -172,7 +182,9 @@ if __name__ == '__main__':
 
     logging.info("Memc loader started with options: %s" % opts)
     try:
+        start_time = time.time()
         main(opts)
+        print(f"--- {(time.time() - start_time)} seconds ---")
     except Exception as e:
         logging.exception("Unexpected error: %s" % e)
         sys.exit(1)
