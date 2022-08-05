@@ -11,6 +11,7 @@ import numpy as np
 import threading
 from optparse import OptionParser
 from concurrent.futures.thread import ThreadPoolExecutor
+from multiprocessing import Process, Manager
 # brew install protobuf
 # protoc  --python_out=. ./appsinstalled.proto
 # pip install protobuf
@@ -20,7 +21,6 @@ import memcache
 
 NORMAL_ERR_RATE = 0.01
 AppsInstalled = collections.namedtuple("AppsInstalled", ["dev_type", "dev_id", "lat", "lon", "apps"])
-Statistic = {"errors": 0, "processed": 0}
 
 def dot_rename(path):
     head, fn = os.path.split(path)
@@ -69,8 +69,7 @@ def parse_appsinstalled(line):
     return AppsInstalled(dev_type, dev_id, lat, lon, apps)
 
 
-def process_lines(device_memc, options, lines, thread_id):
-    global Statistic
+def process_lines(device_memc, options, lines, process_id, process_fished, Statistic):
     chunk_errors = chunk_processed = 0
     for line in lines:
         line = line.strip()
@@ -91,30 +90,29 @@ def process_lines(device_memc, options, lines, thread_id):
             chunk_processed += 1
         else:
             chunk_errors += 1
-    print(f"Log  {thread_id} finish work")
     Statistic["errors"] += chunk_errors
     Statistic["processed"] += chunk_processed
+    process_fished.value += 1
+    print(f"Log  {process_id} finish work x={process_fished}")
 
 
 def main(options):
-    global Statistic
-    global Threads_finish_work
     device_memc = {
         "idfa": options.idfa,
         "gaid": options.gaid,
         "adid": options.adid,
         "dvid": options.dvid,
     }
-    rename_query = []  # очередь для переименования (эта операция должна быть последовательной)
-
-   # print(f"LOG0  {list(glob.iglob(options.pattern))}")
-   # print(f"LOG1  {list(pathlib.Path('.').glob(options.pattern))}")
     for fn in pathlib.Path('.').glob(options.pattern):
         logging.info('Processing %s' % fn)
         fd = gzip.open(fn)
-
+        manager = Manager()
+        process_fished = manager.Value('i', 0)
+        Statistic = manager.dict()
+        Statistic["errors"] = 0
+        Statistic["processed"] = 0
         start_time = time.time()
-        lines_chunks = np.array_split([line for line in fd], 100)
+        lines_chunks = np.array_split([line for line in fd], options.p_count)
         #threads = []
         #for i in range(len(lines_chunks)):
         #    t = threading.Thread(target=process_lines, args=(device_memc, options, lines_chunks[i], f"thread{i}"))
@@ -122,17 +120,27 @@ def main(options):
         #    t.start()
         #while Threads_finish_work < 100:
         #    pass
-        with ThreadPoolExecutor(max_workers=100) as executor:
-            for i in range(len(lines_chunks)):
-                future = executor.submit(process_lines, device_memc, options, lines_chunks[i], f"thread{i}")
-                print(future.result())
-        print(f"Time for lines procecced --- {(time.time() - start_time)} seconds ---")
 
+
+        # способ 2
+       # with ThreadPoolExecutor(max_workers=100) as executor:
+       #     for i in range(len(lines_chunks)):
+       #         future = executor.submit(process_lines, device_memc, options, lines_chunks[i], f"thread{i}")
+       #         print(future.result())
+
+        # способ 3
+        for i in range(len(lines_chunks)):
+            p = Process(target=process_lines, args=(device_memc, options, lines_chunks[i],
+                                                    f"process{i}", process_fished, Statistic))
+            p.start()
+        while process_fished.value < options.p_count:
+            time.sleep(5)
+            print(f"Wait {process_fished.value}")
+        print(f"Time for lines procecced --- {(time.time() - start_time)} seconds ---")
+        print(f"Statistic {Statistic}")
         if not Statistic["processed"]:
             fd.close()
-            rename_query.append(fn)
             dot_rename(fn)
-            Statistic = {"errors": 0, "processed": 0}
             continue
 
         err_rate = float(Statistic["errors"]) / Statistic["processed"]
@@ -141,10 +149,7 @@ def main(options):
         else:
             logging.error("High error rate (%s > %s). Failed load" % (err_rate, NORMAL_ERR_RATE))
         fd.close()
-        rename_query.append(fn)
         dot_rename(fn)
-        Statistic = {"errors": 0, "processed": 0}
-    print(f"LOG2  {len(rename_query)} {rename_query}")
 
 
 def prototest():
@@ -167,6 +172,7 @@ if __name__ == '__main__':
     op = OptionParser()
     op.add_option("-t", "--test", action="store_true", default=False)
     op.add_option("-l", "--log", action="store", default=None)
+    op.add_option("--p_count", action="store", default=10)
     op.add_option("--dry", action="store_true", default=False)
     op.add_option("--pattern", action="store", default="/data/appsinstalled/*.tsv.gz")
     op.add_option("--idfa", action="store", default="127.0.0.1:33013")
