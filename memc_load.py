@@ -3,9 +3,10 @@
 import os
 import gzip
 import sys
-import glob
 import logging
 import collections
+import pathlib
+import time
 from optparse import OptionParser
 # brew install protobuf
 # protoc  --python_out=. ./appsinstalled.proto
@@ -36,7 +37,7 @@ def insert_appsinstalled(memc_addr, appsinstalled, dry_run=False):
     try:
         if dry_run:
             ua_formated = str(ua).replace('\n', ' ')
-            logging.debug(f"{memc_addr} - {key} -> {ua_formated} \n" )
+           # logging.debug(f"{memc_addr} - {key} -> {ua_formated} \n" )
         else:
             memc = memcache.Client([memc_addr])
             memc.set(key, packed)
@@ -72,11 +73,10 @@ def main(options):
         "adid": options.adid,
         "dvid": options.dvid,
     }
-    for fn in glob.iglob(options.pattern):
+    for fn in pathlib.Path('.').glob(options.pattern):
         processed = errors = 0
         logging.info('Processing %s' % fn)
         fd = gzip.open(fn)
-        print(f"LOG  {len(fn)}")
         for line in fd:
             line = line.strip()
             if not line:
@@ -145,7 +145,9 @@ if __name__ == '__main__':
 
     logging.info("Memc loader started with options: %s" % opts)
     try:
+        start_time = time.time()
         main(opts)
+        print(f"--- Total Time {(time.time() - start_time)} seconds ---")
     except Exception as e:
         logging.exception("Unexpected error: %s" % e)
         sys.exit(1)
