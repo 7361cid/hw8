@@ -7,10 +7,8 @@ import logging
 import collections
 import pathlib
 import time
-import numpy as np
-import threading
+
 from optparse import OptionParser
-from concurrent.futures.thread import ThreadPoolExecutor
 from multiprocessing import Process, Manager
 # brew install protobuf
 # protoc  --python_out=. ./appsinstalled.proto
@@ -28,22 +26,19 @@ def dot_rename(path):
     os.rename(path, os.path.join(head, "." + fn))
 
 
-def insert_appsinstalled(memc_addr, appsinstalled, dry_run=False, retry=3):
+def insert_appsinstalled(memc, memc_addr, appsinstalled, dry_run=False, retry=3):
     ua = appsinstalled_pb2.UserApps()
     ua.lat = appsinstalled.lat
     ua.lon = appsinstalled.lon
     key = "%s:%s" % (appsinstalled.dev_type, appsinstalled.dev_id)
     ua.apps.extend(appsinstalled.apps)
     packed = ua.SerializeToString()
-    # @TODO persistent connection
-    # @TODO retry and timeouts!
     while retry:
         if dry_run:
             ua_formated = str(ua).replace('\n', ' ')
             # logging.debug(f"{memc_addr} - {key} -> {ua_formated} \n" )
         else:
             try:
-                memc = memcache.Client([memc_addr])   # создание соединения нужно вынести
                 memc.set(key, packed)
             except Exception as e:
                 logging.exception(f"Cannot write to memc {memc_addr}: {e} - retries {retry}")
@@ -82,6 +77,7 @@ class Loader:
 
     def process_lines(self, device_memc, options, process_fished, Statistic):
         chunk_errors = chunk_processed = 0
+        Client_connections = {}   # for persistent connection
         for line in self.lines:
             line = line.strip()
             if not line:
@@ -96,8 +92,11 @@ class Loader:
                 chunk_errors += 1
                 logging.error("Unknow device type: %s" % appsinstalled.dev_type)
                 continue
-            print(f"Log memc_addr {memc_addr}")  # если не изменяется то не надо пересоздавать соединение
-            ok = insert_appsinstalled(memc_addr, appsinstalled, options.dry)
+            if memc_addr in Client_connections.keys():
+                ok = insert_appsinstalled(Client_connections[memc_addr], memc_addr, appsinstalled, options.dry)
+            else:
+                Client_connections[memc_addr] = memcache.Client([memc_addr])
+                ok = insert_appsinstalled(Client_connections[memc_addr], memc_addr, appsinstalled, options.dry)
             if ok:
                 chunk_processed += 1
             else:
@@ -105,6 +104,29 @@ class Loader:
         Statistic["errors"] += chunk_errors
         Statistic["processed"] += chunk_processed
         process_fished.value += 1
+
+
+def use_loaders_for_lines(lines, device_memc, options):
+    manager = Manager()
+    process_fished = manager.Value('i', 0)
+    Statistic = manager.dict()
+    Statistic["errors"] = 0
+    Statistic["processed"] = 0
+    line_num = 0
+    loaders_list = []
+    for i in range(int(options.p_count)):
+        loaders_list.append(Loader())
+    for line in lines:
+        loaders_list[line_num % len(loaders_list)].lines.append(line)
+        line_num += 1
+    for i in range(len(loaders_list)):
+        p = Process(target=Loader.process_lines, args=(loaders_list[i], device_memc, options,
+                                                       process_fished, Statistic))
+        p.start()
+
+    while process_fished.value < int(options.p_count):
+        time.sleep(5)
+    return Statistic
 
 
 def main(options):
@@ -117,28 +139,30 @@ def main(options):
     for fn in pathlib.Path('.').glob(options.pattern):
         logging.info('Processing %s' % fn)
         fd = gzip.open(fn)
-        manager = Manager()
-        process_fished = manager.Value('i', 0)
-        Statistic = manager.dict()
-        Statistic["errors"] = 0
-        Statistic["processed"] = 0
-        loaders_list = []
-        for i in range(int(options.p_count)):
-            loaders_list.append(Loader())
-        # Распределение линий по лоадерам
-        loader_id = 0
-        for line in fd:
-            loaders_list[loader_id].lines.append(line)
-            loader_id += 1
-            if loader_id == len(loaders_list):
-                loader_id = 0
-        for i in range(len(loaders_list)):
-             p = Process(target=Loader.process_lines, args=(loaders_list[i], device_memc, options,
-                                                            process_fished, Statistic))
-             p.start()
+        Statistic = {"errors": 0, "processed": 0}
 
-        while process_fished.value < int(options.p_count):
-            time.sleep(5)
+        # Распределение линий по лоадерам
+        file_iter = iter(fd)
+        lines = []
+        while True:
+            try:
+                lines.append(file_iter.__next__())
+                if len(lines) == 100000:  # ограничение для экономии памяти
+                    result = use_loaders_for_lines(lines, device_memc, options)
+                    Statistic["errors"] += result["errors"]
+                    Statistic["processed"] += result["processed"]
+                    lines = []
+                    print(f"Statistic update {Statistic}")
+            except StopIteration:
+                print("I break it")
+                if len(lines):
+                    print(f"Log lines left {len(lines)}")
+                    result = use_loaders_for_lines(lines, device_memc, options)
+                    Statistic["errors"] += result["errors"]
+                    Statistic["processed"] += result["processed"]
+                break
+
+        print(f"Statistic {Statistic}")
 
         if not Statistic["processed"]:
             fd.close()
