@@ -28,7 +28,7 @@ def dot_rename(path):
     os.rename(path, os.path.join(head, "." + fn))
 
 
-def insert_appsinstalled(memc_addr, appsinstalled, dry_run=False):
+def insert_appsinstalled(memc_addr, appsinstalled, dry_run=False, retry=3):
     ua = appsinstalled_pb2.UserApps()
     ua.lat = appsinstalled.lat
     ua.lon = appsinstalled.lon
@@ -37,17 +37,24 @@ def insert_appsinstalled(memc_addr, appsinstalled, dry_run=False):
     packed = ua.SerializeToString()
     # @TODO persistent connection
     # @TODO retry and timeouts!
-    try:
+    while retry:
         if dry_run:
             ua_formated = str(ua).replace('\n', ' ')
-           # logging.debug(f"{memc_addr} - {key} -> {ua_formated} \n" )
+            # logging.debug(f"{memc_addr} - {key} -> {ua_formated} \n" )
         else:
-            memc = memcache.Client([memc_addr])
-            memc.set(key, packed)
-    except Exception as e:
-        logging.exception("Cannot write to memc %s: %s" % (memc_addr, e))
-        return False
-    return True
+            try:
+                memc = memcache.Client([memc_addr])   # создание соединения нужно вынести
+                memc.set(key, packed)
+            except Exception as e:
+                logging.exception(f"Cannot write to memc {memc_addr}: {e} - retries {retry}")
+                retry -= 1
+                if retry:
+                    time.sleep(1)
+                    continue
+                else:
+                    break
+        return True
+    return False
 
 
 def parse_appsinstalled(line):
@@ -69,31 +76,35 @@ def parse_appsinstalled(line):
     return AppsInstalled(dev_type, dev_id, lat, lon, apps)
 
 
-def process_lines(device_memc, options, lines, process_id, process_fished, Statistic):
-    chunk_errors = chunk_processed = 0
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        line = line.decode()
-        appsinstalled = parse_appsinstalled(line)
-        if not appsinstalled:
-            chunk_errors += 1
-            continue
-        memc_addr = device_memc.get(appsinstalled.dev_type)
-        if not memc_addr:
-            chunk_errors += 1
-            logging.error("Unknow device type: %s" % appsinstalled.dev_type)
-            continue
-        ok = insert_appsinstalled(memc_addr, appsinstalled, options.dry)  # Эту часть можно запараллелить
-        if ok:
-            chunk_processed += 1
-        else:
-            chunk_errors += 1
-    Statistic["errors"] += chunk_errors
-    Statistic["processed"] += chunk_processed
-    process_fished.value += 1
-    print(f"Log  {process_id} finish work x={process_fished}")
+class Loader:
+    def __init__(self):
+        self.lines = []
+
+    def process_lines(self, device_memc, options, process_fished, Statistic):
+        chunk_errors = chunk_processed = 0
+        for line in self.lines:
+            line = line.strip()
+            if not line:
+                continue
+            line = line.decode()
+            appsinstalled = parse_appsinstalled(line)
+            if not appsinstalled:
+                chunk_errors += 1
+                continue
+            memc_addr = device_memc.get(appsinstalled.dev_type)
+            if not memc_addr:
+                chunk_errors += 1
+                logging.error("Unknow device type: %s" % appsinstalled.dev_type)
+                continue
+            print(f"Log memc_addr {memc_addr}")  # если не изменяется то не надо пересоздавать соединение
+            ok = insert_appsinstalled(memc_addr, appsinstalled, options.dry)
+            if ok:
+                chunk_processed += 1
+            else:
+                chunk_errors += 1
+        Statistic["errors"] += chunk_errors
+        Statistic["processed"] += chunk_processed
+        process_fished.value += 1
 
 
 def main(options):
@@ -111,33 +122,24 @@ def main(options):
         Statistic = manager.dict()
         Statistic["errors"] = 0
         Statistic["processed"] = 0
-        start_time = time.time()
-        lines_chunks = np.array_split([line for line in fd], options.p_count)
-        #threads = []
-        #for i in range(len(lines_chunks)):
-        #    t = threading.Thread(target=process_lines, args=(device_memc, options, lines_chunks[i], f"thread{i}"))
-        #    threads.append(t)
-        #    t.start()
-        #while Threads_finish_work < 100:
-        #    pass
+        loaders_list = []
+        for i in range(int(options.p_count)):
+            loaders_list.append(Loader())
+        # Распределение линий по лоадерам
+        loader_id = 0
+        for line in fd:
+            loaders_list[loader_id].lines.append(line)
+            loader_id += 1
+            if loader_id == len(loaders_list):
+                loader_id = 0
+        for i in range(len(loaders_list)):
+             p = Process(target=Loader.process_lines, args=(loaders_list[i], device_memc, options,
+                                                            process_fished, Statistic))
+             p.start()
 
-
-        # способ 2
-       # with ThreadPoolExecutor(max_workers=100) as executor:
-       #     for i in range(len(lines_chunks)):
-       #         future = executor.submit(process_lines, device_memc, options, lines_chunks[i], f"thread{i}")
-       #         print(future.result())
-
-        # способ 3
-        for i in range(len(lines_chunks)):
-            p = Process(target=process_lines, args=(device_memc, options, lines_chunks[i],
-                                                    f"process{i}", process_fished, Statistic))
-            p.start()
-        while process_fished.value < options.p_count:
+        while process_fished.value < int(options.p_count):
             time.sleep(5)
-            print(f"Wait {process_fished.value}")
-        print(f"Time for lines procecced --- {(time.time() - start_time)} seconds ---")
-        print(f"Statistic {Statistic}")
+
         if not Statistic["processed"]:
             fd.close()
             dot_rename(fn)
@@ -190,7 +192,7 @@ if __name__ == '__main__':
     try:
         start_time = time.time()
         main(opts)
-        print(f"--- {(time.time() - start_time)} seconds ---")
+        print(f"--- Total Time {(time.time() - start_time)} seconds ---")
     except Exception as e:
         logging.exception("Unexpected error: %s" % e)
         sys.exit(1)
