@@ -9,7 +9,7 @@ import pathlib
 import time
 
 from optparse import OptionParser
-from multiprocessing import Process, Manager
+from multiprocessing import Process, Pipe
 # brew install protobuf
 # protoc  --python_out=. ./appsinstalled.proto
 # pip install protobuf
@@ -75,7 +75,7 @@ class Loader:
     def __init__(self):
         self.lines = []
 
-    def process_lines(self, device_memc, options, process_fished, Statistic):
+    def process_lines(self, device_memc, options, child_conn):
         chunk_errors = chunk_processed = 0
         Client_connections = {}   # for persistent connection
         for line in self.lines:
@@ -101,17 +101,12 @@ class Loader:
                 chunk_processed += 1
             else:
                 chunk_errors += 1
-        Statistic["errors"] += chunk_errors
-        Statistic["processed"] += chunk_processed
-        process_fished.value += 1
+        Statistic = {"errors": chunk_errors, "processed": chunk_processed}
+        child_conn.send(["finish", Statistic])
 
 
 def use_loaders_for_lines(lines, device_memc, options):
-    manager = Manager()
-    process_fished = manager.Value('i', 0)
-    Statistic = manager.dict()
-    Statistic["errors"] = 0
-    Statistic["processed"] = 0
+    Statistic = {"errors": 0, "processed": 0}
     line_num = 0
     loaders_list = []
     for i in range(int(options.p_count)):
@@ -119,12 +114,17 @@ def use_loaders_for_lines(lines, device_memc, options):
     for line in lines:
         loaders_list[line_num % len(loaders_list)].lines.append(line)
         line_num += 1
+    parent_conn, child_conn = Pipe()
     for i in range(len(loaders_list)):
-        p = Process(target=Loader.process_lines, args=(loaders_list[i], device_memc, options,
-                                                       process_fished, Statistic))
+        p = Process(target=Loader.process_lines, args=(loaders_list[i], device_memc, options, child_conn))
         p.start()
-
-    while process_fished.value < int(options.p_count):
+    process_fished = 0
+    while process_fished < int(options.p_count):
+        data = parent_conn.recv()
+        if "finish" in data:
+            process_fished += 1
+            Statistic["errors"] += data[1]["errors"]
+            Statistic["processed"] += data[1]["processed"]
         time.sleep(5)
     return Statistic
 
@@ -152,17 +152,12 @@ def main(options):
                     Statistic["errors"] += result["errors"]
                     Statistic["processed"] += result["processed"]
                     lines = []
-                    print(f"Statistic update {Statistic}")
             except StopIteration:
-                print("I break it")
                 if len(lines):
-                    print(f"Log lines left {len(lines)}")
                     result = use_loaders_for_lines(lines, device_memc, options)
                     Statistic["errors"] += result["errors"]
                     Statistic["processed"] += result["processed"]
                 break
-
-        print(f"Statistic {Statistic}")
 
         if not Statistic["processed"]:
             fd.close()
