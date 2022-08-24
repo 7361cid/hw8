@@ -28,7 +28,7 @@ def dot_rename(path):
     os.rename(path, os.path.join(head, "." + fn))
 
 
-def insert_appsinstalled(memc_addr, appsinstalled, dry_run=False):
+def insert_appsinstalled(memc_addr, appsinstalled, dry_run=False, retry=3):
     ua = appsinstalled_pb2.UserApps()
     ua.lat = appsinstalled.lat
     ua.lon = appsinstalled.lon
@@ -37,17 +37,24 @@ def insert_appsinstalled(memc_addr, appsinstalled, dry_run=False):
     packed = ua.SerializeToString()
     # @TODO persistent connection
     # @TODO retry and timeouts!
-    try:
+    while retry:
         if dry_run:
             ua_formated = str(ua).replace('\n', ' ')
-           # logging.debug(f"{memc_addr} - {key} -> {ua_formated} \n" )
+            # logging.debug(f"{memc_addr} - {key} -> {ua_formated} \n" )
         else:
-            memc = memcache.Client([memc_addr])
-            memc.set(key, packed)
-    except Exception as e:
-        logging.exception("Cannot write to memc %s: %s" % (memc_addr, e))
-        return False
-    return True
+            try:
+                memc = memcache.Client([memc_addr])   # создание соединения нужно вынести
+                memc.set(key, packed)
+            except Exception as e:
+                logging.exception(f"Cannot write to memc {memc_addr}: {e} - retries {retry}")
+                retry -= 1
+                if retry:
+                    time.sleep(1)
+                    continue
+                else:
+                    break
+        return True
+    return False
 
 
 def parse_appsinstalled(line):
@@ -89,6 +96,7 @@ class Loader:
                 chunk_errors += 1
                 logging.error("Unknow device type: %s" % appsinstalled.dev_type)
                 continue
+            print(f"Log memc_addr {memc_addr}")  # если не изменяется то не надо пересоздавать соединение
             ok = insert_appsinstalled(memc_addr, appsinstalled, options.dry)
             if ok:
                 chunk_processed += 1
