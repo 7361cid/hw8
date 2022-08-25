@@ -125,7 +125,6 @@ def use_loaders_for_lines(lines, device_memc, options):
             process_fished += 1
             Statistic["errors"] += data[1]["errors"]
             Statistic["processed"] += data[1]["processed"]
-        time.sleep(5)
     return Statistic
 
 
