@@ -1,15 +1,14 @@
-// s project main.go
 package main
 
 import (
 	"encoding/csv"
 	"fmt"
-	"go-memorycache-example"
+	memorycache "github.com/maxchagin/go-memorycache-example"
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"time"
-
 	//	"reflect"
 	"strings"
 )
@@ -26,12 +25,16 @@ func cache_data(data []Parsed_data) {
 	cache := memorycache.New(5*time.Minute, 10*time.Minute)
 	for _, element := range data {
 		fmt.Println(element)
+		var key string = element.dev_type + ":" + element.dev_id
+		var value string = strings.Join(element.raw_apps, " ")
+		cache.Set(key, value, 5*time.Minute)
 	}
-	cache.Set("myKey", "My value", 5*time.Minute)
 }
 
 func main() {
-	f, err := os.Open("C:\\Users\\chernov.ilia\\20170929000000\\20170929000000.tsv")
+	files, _ := filepath.Glob("*.tsv")
+	fmt.Printf("%q\n", files)
+	f, err := os.Open(files[0])
 	if err != nil {
 		log.Fatal(err)
 	}
