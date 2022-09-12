@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 	//	"reflect"
 	"strings"
@@ -32,6 +33,7 @@ func cache_data(data []Parsed_data) {
 }
 
 func main() {
+	var wg sync.WaitGroup
 	files, _ := filepath.Glob("*.tsv")
 	fmt.Printf("%q\n", files)
 	f, err := os.Open(files[0])
@@ -56,8 +58,14 @@ func main() {
 		s := strings.Split(rec[0], "	")
 		struct_slice = append(struct_slice, Parsed_data{s[0], s[1], s[2], s[3], rec[1:]})
 		if x == 10 {
-			cache_data(struct_slice)
-			break
+			wg.Add(1)
+			go func(data []Parsed_data) {
+				// Decrement the counter when the goroutine completes.
+				defer wg.Done()
+				// Fetch the URL.
+				cache_data(struct_slice)
+			}(struct_slice)
 		}
 	}
+	wg.Wait()
 }
