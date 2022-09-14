@@ -3,15 +3,15 @@ package main
 import (
 	"encoding/csv"
 	"fmt"
-	memorycache "github.com/maxchagin/go-memorycache-example"
+	memorycache "go-memorycache-example"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"sync"
 	"time"
-	//	"reflect"
-	"strings"
 )
 
 type Parsed_data struct {
@@ -25,10 +25,10 @@ type Parsed_data struct {
 func cache_data(data []Parsed_data) {
 	cache := memorycache.New(5*time.Minute, 10*time.Minute)
 	for _, element := range data {
-		fmt.Println(element)
 		var key string = element.dev_type + ":" + element.dev_id
 		var value string = strings.Join(element.raw_apps, " ")
 		cache.Set(key, value, 5*time.Minute)
+		fmt.Println("Fragment loaded")
 	}
 }
 
@@ -44,27 +44,39 @@ func main() {
 	// remember to close the file at the end of the program
 	defer f.Close()
 	var x = 0
+	var file_end = false
 	//var slice = make([]string, 1)
 	// read csv values using csv.Reader
 	csvReader := csv.NewReader(f)
-	var struct_slice []Parsed_data
+	var struct_slice [10][]Parsed_data
+	fmt.Println(reflect.TypeOf(struct_slice))
 	for {
-		rec, err := csvReader.Read()
-		if err == io.EOF {
-			break
+		for i := 0; i < 10; i++ {
+			for j := 0; j < 10; j++ {
+				rec, err := csvReader.Read()
+				if err == io.EOF {
+					file_end = true
+					break
+				}
+				s := strings.Split(rec[0], "	")
+				struct_slice[i] = append(struct_slice[i], Parsed_data{s[0], s[1], s[2], s[3], rec[1:]})
+				x = x + 1
+			}
 		}
-		x = x + 1
-		//slice = append(slice, rec)
-		s := strings.Split(rec[0], "	")
-		struct_slice = append(struct_slice, Parsed_data{s[0], s[1], s[2], s[3], rec[1:]})
-		if x == 10 {
+
+		for i := 0; i < 9; i++ {
 			wg.Add(1)
 			go func(data []Parsed_data) {
 				// Decrement the counter when the goroutine completes.
 				defer wg.Done()
-				// Fetch the URL.
-				cache_data(struct_slice)
-			}(struct_slice)
+				cache_data(data)
+			}(struct_slice[i])
+		}
+		if file_end {
+			break
+		}
+		if x > 100000 {
+			break
 		}
 	}
 	wg.Wait()
